@@ -1,6 +1,6 @@
 [package]
 name = "swcc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Sunrise Worlds Cheats Checker - локальный сканер признаков чит-клиентов Minecraft"
 

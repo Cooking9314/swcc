@@ -22,9 +22,14 @@ pub struct Report {
     pub id: String,
     pub created_at: String,
     pub app_version: String,
+    /// Ник, который игрок ввёл перед проверкой: по нему админ составляет команду бана.
+    #[serde(default)]
+    pub player: String,
     pub agreement: AgreementRecord,
     pub roots: Vec<GameRoot>,
-    pub deep_archives: bool,
+    /// Включённые настройки проверки - чтобы админ понимал, насколько полной был обход.
+    #[serde(default)]
+    pub settings: Vec<String>,
     pub result: ScanResult,
 }
 
@@ -39,16 +44,18 @@ impl Report {
         result: ScanResult,
         roots: Vec<GameRoot>,
         agreement: AgreementRecord,
-        deep_archives: bool,
+        player: String,
+        settings: Vec<String>,
     ) -> Self {
         Report {
             format: format!("swcc/{FORMAT_VERSION}"),
             id: report_id(),
             created_at: chrono::Local::now().to_rfc3339(),
             app_version: APP_VERSION.to_string(),
+            player,
             agreement,
             roots,
-            deep_archives,
+            settings,
             result,
         }
     }
@@ -86,6 +93,7 @@ impl Report {
         rule(&mut o, '=');
         kv(&mut o, "Отчёт N", &self.id);
         kv(&mut o, "Сформирован", &self.created_at);
+        kv(&mut o, "Игрок", &self.player);
         kv(
             &mut o,
             "Согласие игрока",
@@ -134,7 +142,7 @@ impl Report {
         section(&mut o, "КАК ПРОВЕРЯТЬ ЭТОТ ОТЧЁТ (памятка админу)");
         for hint in [
             "Отчёт - повод для проверки, а не доказательство. Бан только по заключению сканера обосновать нельзя.",
-            "Сверь SHA-256 названных файлов с официальными релизами модов: пересобранный jar под именем легитимного мода - главный приём маскировки.",
+            "Сверь названный файл с официальным релизом: пересобранный jar под именем легитимного мода - главный приём маскировки.",
             "Запроси у игрока сам файл (или ссылку на его публичный релиз) и путь к нему;совпадение пути в отчёте и присланного файла подтверждает находку.",
             "Смотри время изменения файлов: чит, скачанный за минуты до забан-события, и мод, установленный месяц назад, - это разные ситуации.",
             "Обнови базу сигнатур (signatures/custom.toml) при появлении нового клиента: встроенная база знает ограниченное число клиентов.",
@@ -151,7 +159,12 @@ impl Report {
             for root in &self.roots {
                 bullet(
                     &mut o,
-                    &format!("[{}] {} - {}", root.kind.ru(), root.label, root.path),
+                    &format!(
+                        "[{}] {} - {}",
+                        root.kind.ru(),
+                        root.label,
+                        crate::paths::shown_path(&root.path)
+                    ),
                 );
             }
         }
@@ -162,20 +175,14 @@ impl Report {
         if self.roots.iter().any(|r| !r.kind.is_game()) {
             bullet(
                 &mut o,
-                "Режим проверки всего компьютера: диски обойдены по именам, размерам и датам. \
-                 Содержимое файлов вне игровых папок читалось только там, где имя или путь уже \
-                 дали зацепку. Системные каталоги (Windows, WinSxS, DriverStore, Temp, \
-                 $Recycle.Bin, System Volume Information) пропущены - их перебор не находит \
-                 ничего, кроме ложных срабатываний.",
+                "Широкие папки (корни дисков и папки без признаков игры) обойдены только по \
+                 именам, размерам и датам: содержимое файлов открывалось лишь там, где имя или \
+                 путь уже дали зацепку.",
             );
         }
-        bullet(
-            &mut o,
-            &format!(
-                "Глубокая распаковка архивов: {}",
-                if self.deep_archives { "включена" } else { "выключена" }
-            ),
-        );
+        for s in &self.settings {
+            bullet(&mut o, s);
+        }
         blank(&mut o);
 
         section(&mut o, "СТАТИСТИКА");
@@ -193,15 +200,6 @@ impl Report {
             &format!(
                 "{} (пропущено по бюджету: {})",
                 r.stats.archives_deep_scanned, r.stats.archives_skipped_by_budget
-            ),
-        );
-        kv(
-            &mut o,
-            "SHA-256 вычислено",
-            &format!(
-                "{} файлов, {} МБ",
-                r.stats.files_hashed,
-                r.stats.hash_bytes / (1024 * 1024)
             ),
         );
         kv(
@@ -282,13 +280,9 @@ impl Report {
             );
             for m in &r.mods {
                 o.push_str(&format!(
-                    "    {:<52} {:>10}  {}\n",
+                    "    {:<52} {:>10} байт\n",
                     truncate(&m.rel_path, 52),
-                    m.size_bytes,
-                    m.sha256
-                        .as_deref()
-                        .map(|h| &h[..16.min(h.len())])
-                        .unwrap_or("хэш не вычислен")
+                    m.size_bytes
                 ));
             }
         }
@@ -317,7 +311,7 @@ impl Report {
             "Сканер ищет файлы по известным сигнатурам. Самописный или пересобранный чит он может не увидеть: чистый отчёт не равен честной игре.",
             "Ложные срабатывания возможны: совпадение имени или строки в легитимном моде - не чит. Поэтому у каждой находки указан признак и уверенность.",
             "Отчёт формируется на машине игрока, которую он контролирует. Печать ниже ловит случайную правку и повреждение файла, но не подделку: ключ печати находится в той же программе, что и у игрока.",
-            "Отсюда вывод: решение принимай по совокупности - отчёт + запрошенные файлы по хэшам + серверные логи поведения.",
+            "Отсюда вывод: решение принимай по совокупности - отчёт + запрошенные у игрока файлы + серверные логи поведения.",
         ] {
             bullet(&mut o, t);
         }
@@ -338,7 +332,7 @@ impl Report {
         o.push_str(&format!("{SEAL_MARKER} {}\n", self.seal()));
         blank(&mut o);
         kv(&mut o, "Печать", &self.seal());
-        line(&mut o, " печать = SHA-256(salt + payload), первые 24 hex");
+        line(&mut o, " печать = контрольная сумма машиночитаемой части, первые 24 символа");
         rule(&mut o, '=');
         line(&mut o, &format!(" конец отчёта {}", self.id));
         rule(&mut o, '=');
@@ -360,7 +354,7 @@ impl Report {
         let Some(start) = body.find(PAYLOAD_START) else {
             return VerifyOutcome {
                 intact: false,
-                detail: "В файле нет машинычитаемой части: это не .swcc или файл обрезан.".into(),
+                detail: "В файле нет машиночитаемой части: это не .swcc или файл обрезан.".into(),
                 report: None,
             };
         };
@@ -444,11 +438,6 @@ fn render_finding(o: &mut String, index: usize, f: &Finding) {
                 o,
                 "Размер / изменён",
                 &format!("{} байт  |  {}", file.size_bytes, file.modified),
-            );
-            kv(
-                o,
-                "SHA-256",
-                file.sha256.as_deref().unwrap_or("не вычислен (вне бюджета или слишком большой)"),
             );
         }
         crate::scanner::Evidence::Directory { root, rel_path } => {
@@ -643,13 +632,12 @@ mod tests {
             confidence: conf,
             weight: 60,
             explain: "тест".into(),
-            verify: "проверь хэш".into(),
+            verify: "сверь файл с релизом".into(),
             evidence: Evidence::File(FileEvidence {
                 root: "Minecraft".into(),
                 rel_path: path.to_string(),
                 size_bytes: 1234,
                 modified: "2026-11-01T10:00:00".into(),
-                sha256: Some("a".repeat(64)),
             }),
         }
     }
@@ -663,7 +651,6 @@ mod tests {
                 name: "sodium.jar".into(),
                 rel_path: "mods/sodium.jar".into(),
                 size_bytes: 1,
-                sha256: None,
             }],
             resource_packs: vec![],
             environment: Default::default(),
@@ -690,7 +677,8 @@ mod tests {
                 path: "C:/fake/.minecraft".into(),
                 kind: crate::paths::RootKind::Standard,
             }],
-            deep_archives: true,
+            player: "Steve_93".into(),
+            settings: vec!["Чтение содержимого файлов: включено".into()],
             result: result(findings),
         }
     }
@@ -751,6 +739,18 @@ mod tests {
                 "строка длиннее разметки: {l}"
             );
         }
+    }
+
+    #[test]
+    fn report_names_the_player_and_never_a_hash() {
+        let r = report(vec![finding(Severity::Critical, 0.95, "mods/meteor.jar")]);
+        let text = r.render();
+        let human = text.split(PAYLOAD_START).next().unwrap_or_default();
+        assert!(human.contains("Steve_93"), "в отчёте нет ника игрока: {human}");
+        for banned in ["SHA", "sha", "хэш", "Хэш", "хеш"] {
+            assert!(!human.contains(banned), "в тексте отчёта упоминается {banned}");
+        }
+        assert!(text.contains(SEAL_MARKER), "после payload нет строки печати");
     }
 
     #[test]

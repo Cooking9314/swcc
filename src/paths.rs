@@ -30,8 +30,8 @@ impl RootKind {
         match self {
             RootKind::Standard => "стандартная",
             RootKind::LauncherInstance => "инстанс лаунчера",
-            RootKind::Manual => "выбрана вручную",
-            RootKind::Drive => "диск целиком",
+            RootKind::Manual => "папка игры выбрана вручную",
+            RootKind::Drive => "обход по метаданным",
         }
     }
 
@@ -54,6 +54,13 @@ pub fn looks_like_game_root(path: &Path) -> bool {
 
 fn env_dir(key: &str) -> Option<PathBuf> {
     std::env::var_os(key).map(PathBuf::from).filter(|p| p.is_dir())
+}
+
+/// Путь для показа человеку. `canonicalize` на Windows добавляет префикс
+/// `\\?\`, который нужен для длинных путей при обходе, но в отчёте и в окне
+/// только шумит: обход идёт по исходному `GameRoot.path`, а тут мы его снимаем.
+pub fn shown_path(path: &str) -> String {
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
 /// Кандидаты, где лаунчеры держат игровые папки. Перечисляем только по одному
@@ -133,14 +140,17 @@ fn shallow_children(base: &Path, limit: usize) -> Vec<PathBuf> {
     out
 }
 
-/// Корни для проверки всего компьютера: локальные диски. Обход идёт только по
+/// Корни для обхода дисков: локальные диски. Обход идёт только по
 /// именам и атрибутам - содержимое вне игровых папок мы не читаем (см. scanner).
 pub fn computer_roots() -> Vec<GameRoot> {
     let mut out = Vec::new();
     for (i, path) in drive_paths().into_iter().enumerate() {
         let letter = path.chars().next().unwrap_or('?').to_ascii_uppercase();
         out.push(GameRoot {
-            label: format!("Диск {letter}: / [{}] диск", if i == 0 { "системный" } else { "локальный" }),
+            label: format!(
+                "Диск {letter} ({})",
+                if i == 0 { "системный" } else { "локальный" }
+            ),
             path,
             kind: RootKind::Drive,
         });
@@ -216,50 +226,37 @@ pub fn discover_roots() -> Vec<GameRoot> {
     roots
 }
 
-/// Почему выбранный вручную путь нельзя сканировать. Возвращает причину отказа.
-pub fn reject_reason(path: &Path) -> Option<String> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+/// Игровая папка - та, где есть признаки Minecraft: её обходят с чтением
+/// содержимого. Всё остальное (выбранная вручную папка без признаков игры,
+/// корень диска, домашний каталог) - только имена, размеры и даты.
+pub fn is_wide_root(path: &Path) -> bool {
+    path.parent().is_none() || !looks_like_game_root(path)
+}
 
-    if !canonical.is_dir() {
-        return Some("Это не каталог. Нужно выбрать саму папку игры, а не файл.".into());
-    }
-
-    // Защита от сканирования диска целиком или домашнего каталога: такие пути
-    // никогда не бывают игровыми корнями, и читать их содержимое мы не будем.
-    if canonical.parent().is_none() {
-        return Some(
-            "Нельзя сканировать корень диска. Выберите папку Minecraft (например C:\\Users\\you\\AppData\\Roaming\\.minecraft)."
-                .into(),
-        );
-    }
-
-    if let Some(home) = env_dir("USERPROFILE").map(|h| h.canonicalize().unwrap_or(h)) {
-        if canonical == home {
-            return Some(
-                "Нельзя сканировать домашний каталог целиком. Выберите папку Minecraft."
-                    .into(),
-            );
-        }
-    }
-
-    if !looks_like_game_root(&canonical) {
-        return Some(
-            "В выбранной папке нет признаков Minecraft (нет каталога versions). Скорее всего выбран не тот уровень: обычно mods лежат в ...\\.minecraft или в папке инстанса."
-                .into(),
-        );
-    }
-    None
+/// Домашний каталог игрока: как и корень диска, обходится только по метаданным.
+fn home_dir() -> Option<PathBuf> {
+    env_dir("USERPROFILE").map(|h| h.canonicalize().unwrap_or(h))
 }
 
 pub fn accept_manual_root(path: &Path) -> Result<GameRoot, String> {
-    if let Some(reason) = reject_reason(path) {
-        return Err(reason);
-    }
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.is_dir() {
+        return Err("Это не каталог: нужно выбрать папку, а не файл.".into());
+    }
+    let wide = is_wide_root(&canonical)
+        || home_dir().is_some_and(|h| h == canonical);
+    let name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| canonical.to_string_lossy().into_owned());
     Ok(GameRoot {
-        label: "Выбрано вручную".into(),
+        label: if wide {
+            format!("Папка целиком: {name}")
+        } else {
+            format!("Папка игры: {name}")
+        },
         path: canonical.to_string_lossy().into_owned(),
-        kind: RootKind::Manual,
+        kind: if wide { RootKind::Drive } else { RootKind::Manual },
     })
 }
 
@@ -277,11 +274,22 @@ mod tests {
     }
 
     #[test]
-    fn random_folder_is_rejected() {
-        let dir = std::env::temp_dir().join(format!("swcc-reject-{}", std::process::id()));
+    fn random_folder_is_accepted_as_metadata_only() {
+        let dir = std::env::temp_dir().join(format!("swcc-plain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(reject_reason(&dir).is_some());
+        let root = accept_manual_root(&dir).expect("любую папку можно добавить");
+        assert!(!root.kind.is_game(), "папка без признаков игры читается только по метаданным");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn game_folder_is_accepted_for_full_read() {
+        let dir = std::env::temp_dir().join(format!("swcc-game-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("versions")).unwrap();
+        let root = accept_manual_root(&dir).expect("папку игры можно добавить");
+        assert!(root.kind.is_game());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -17,6 +17,16 @@ pub const OK: Color32 = Color32::from_rgb(96, 205, 132);
 pub const WARN: Color32 = Color32::from_rgb(236, 176, 86);
 pub const DANGER: Color32 = Color32::from_rgb(235, 96, 104);
 
+/// Полужирное начертание Inter. В egui `.strong()` меняет только цвет: вес
+/// текста берётся из шрифта, поэтому для заголовков нужно отдельное семейство.
+pub fn semibold() -> egui::FontFamily {
+    egui::FontFamily::Name("Inter SemiBold".into())
+}
+
+pub fn heading(text: impl Into<String>, size: f32, color: Color32) -> RichText {
+    RichText::new(text.into()).size(size).color(color).family(semibold())
+}
+
 /// Единый тёмный стиль: скругления, мягкие тени, воздух между блоками.
 pub fn apply(ctx: &egui::Context) {
     let mut style = egui::Style::default();
@@ -76,17 +86,15 @@ pub fn apply(ctx: &egui::Context) {
     style.spacing.indent = 18.0;
     style.spacing.interact_size = Vec2::new(24.0, 24.0);
 
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        egui::FontId::proportional(21.0),
-    );
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, egui::FontId::new(21.0, semibold()));
     style
         .text_styles
         .insert(egui::TextStyle::Body, egui::FontId::proportional(14.5));
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::proportional(15.0),
-    );
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::new(15.0, semibold()));
     style.text_styles.insert(
         egui::TextStyle::Small,
         egui::FontId::proportional(12.0),

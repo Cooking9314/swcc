@@ -223,7 +223,7 @@ impl RuleKind {
             RuleKind::ArchiveContent => "содержимое архива",
             RuleKind::TextContent => "содержимое текста",
             RuleKind::LaunchLog => "лог запуска",
-            RuleKind::KnownHash => "совпал известный хэш",
+            RuleKind::KnownHash => "файл совпадает с известным признаком",
         }
     }
 }

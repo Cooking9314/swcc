@@ -10,7 +10,8 @@ use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke
 
 use crate::agreement::{self, AgreementRecord, ACCEPT_STATEMENT, WARNING};
 use crate::icon_data;
-use crate::paths::{self, GameRoot};
+use crate::paths::{self, GameRoot, RootKind};
+use crate::player;
 use crate::scanner::{ScanEvent, ScanOptions, ScanResult, Scanner, Verdict};
 use crate::signatures::{Severity, SignatureDb};
 use crate::style;
@@ -29,6 +30,61 @@ enum Tab {
     Method,
 }
 
+/// Настройки проверки: то, что игрок может выбрать сам. Значения по умолчанию
+/// соответствуют `ScanOptions::default`.
+#[derive(Clone, Copy)]
+struct Settings {
+    read_content: bool,
+    deep_archives: bool,
+    read_logs: bool,
+    skip_system_dirs: bool,
+    min_confidence: f32,
+    max_files: u64,
+    max_file_mb: u64,
+    deep_budget_mb: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            read_content: true,
+            deep_archives: true,
+            read_logs: true,
+            skip_system_dirs: true,
+            min_confidence: 0.35,
+            max_files: 0,
+            max_file_mb: 0,
+            deep_budget_mb: 384,
+        }
+    }
+}
+
+impl Settings {
+    fn options(&self, roots: Vec<GameRoot>) -> ScanOptions {
+        ScanOptions {
+            roots,
+            read_content: self.read_content,
+            deep_archives: self.deep_archives,
+            read_logs: self.read_logs,
+            skip_system_dirs: self.skip_system_dirs,
+            min_confidence: self.min_confidence,
+            max_files: self.max_files,
+            max_file_bytes: self.max_file_mb * 1024 * 1024,
+            deep_budget_bytes: self.deep_budget_mb * 1024 * 1024,
+            ..Default::default()
+        }
+    }
+}
+
+/// Ник, папки и настройки той проверки, чей результат сейчас в окне: отчёт
+/// должен описывать именно их, а не то, что игрок передвинул потом.
+#[derive(Clone)]
+struct ScanRun {
+    player: String,
+    settings: Vec<String>,
+    roots: Vec<GameRoot>,
+}
+
 pub struct App {
     screen: Screen,
     tab: Tab,
@@ -37,11 +93,12 @@ pub struct App {
     agreement: Option<AgreementRecord>,
     logo: egui::TextureHandle,
 
+    player_nick: String,
     roots: Vec<GameRoot>,
     drive_roots: Vec<GameRoot>,
     picked: HashSet<usize>,
-    deep_archives: bool,
-    whole_pc: bool,
+    picked_drives: HashSet<usize>,
+    settings: Settings,
 
     db: Arc<SignatureDb>,
     db_dir: PathBuf,
@@ -52,6 +109,9 @@ pub struct App {
     progress_current: u64,
     progress_note: String,
     progress_phase: &'static str,
+
+    /// Что реально сканировалось в последней завершённой проверке.
+    last_run: Option<ScanRun>,
 
     report: Option<Report>,
     status: String,
@@ -78,10 +138,11 @@ impl App {
         let picked = (0..roots.len()).collect::<HashSet<usize>>();
         let drive_roots = paths::computer_roots();
         let status = if roots.is_empty() {
-            "Папки Minecraft не найдены - добавь вручную после принятия соглашения.".to_string()
+            "Папки Minecraft не найдены - добавь нужную папку вручную после принятия соглашения."
+                .to_string()
         } else {
             format!(
-                "Найдено папок игры: {}, дисков: {}.",
+                "Найдено папок игры: {}, дисков: {}. Впиши ник и начинай проверку.",
                 roots.len(),
                 drive_roots.len()
             )
@@ -94,11 +155,12 @@ impl App {
             agreement: None,
             logo,
             db_dir,
+            player_nick: String::new(),
             roots,
             drive_roots,
             picked,
-            deep_archives: true,
-            whole_pc: false,
+            picked_drives: HashSet::new(),
+            settings: Settings::default(),
             status,
             scanning: false,
             rx: None,
@@ -106,6 +168,7 @@ impl App {
             progress_current: 0,
             progress_note: String::new(),
             progress_phase: "",
+            last_run: None,
             report: None,
             db,
         }
@@ -121,15 +184,28 @@ impl App {
             .filter(|(i, _)| self.picked.contains(i))
             .map(|(_, r)| r.clone())
             .collect();
-        if self.whole_pc {
-            out.extend(self.drive_roots.iter().cloned());
-        }
+        out.extend(
+            self.drive_roots
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.picked_drives.contains(i))
+                .map(|(_, r)| r.clone()),
+        );
         out
     }
 
+    /// Чему равно текущее значение в поле ника: пустое, неполное или годное.
+    fn nick_state(&self) -> Result<String, &'static str> {
+        player::check_nick(&self.player_nick)
+    }
+
     fn walk_limit(&self) -> u64 {
-        let base = self.db.params.max_walk_files;
-        if self.whole_pc { base * 8 } else { base }
+        let base = if self.settings.max_files > 0 {
+            self.settings.max_files
+        } else {
+            self.db.params.max_walk_files
+        };
+        if self.selected_roots().iter().any(|r| !r.kind.is_game()) { base * 8 } else { base }
     }
 
     fn start_scan(&mut self) {
@@ -140,19 +216,27 @@ impl App {
             self.screen = Screen::Agreement;
             return;
         };
+        let nick = match self.nick_state() {
+            Ok(nick) => nick,
+            Err(problem) => {
+                self.status = format!("Без ника проверка не запустится: {problem}");
+                return;
+            }
+        };
         let roots = self.selected_roots();
         if roots.is_empty() {
-            self.status = "Не выбрано ни одной папки игры: проверять нечего.".into();
+            self.status = "Не выбрано ни одной папки или диска: проверять нечего.".into();
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let db = Arc::clone(&self.db);
-        let opts = ScanOptions {
-            roots,
-            deep_archives: self.deep_archives,
-            whole_pc: self.whole_pc,
-            ..Default::default()
+        let run_roots = roots.clone();
+        let opts = self.settings.options(roots);
+        let run = ScanRun {
+            player: nick,
+            settings: opts.summary(),
+            roots: run_roots,
         };
         let thread_cancel = Arc::clone(&cancel);
         std::thread::spawn(move || {
@@ -164,16 +248,19 @@ impl App {
         self.cancel = Some(cancel);
         self.scanning = true;
         self.report = None;
+        self.last_run = Some(run);
         self.tab = Tab::Result;
         self.progress_current = 0;
         self.progress_note.clear();
-        let tail = if self.whole_pc {
-            " Диски обходятся по метаданным - это дольше."
+        let drives = self.picked_drives.len();
+        let tail = if drives > 0 {
+            format!(" Дисков в обходе: {drives} - это дольше.")
         } else {
-            ""
+            String::new()
         };
         self.status = format!(
-            "Проверка запущена (согласие от {}).{tail}",
+            "Проверка запущена для {} (согласие от {}).{tail}",
+            self.player_nick.trim(),
             agreement.accepted_at
         );
     }
@@ -205,12 +292,17 @@ impl App {
                 }
                 ScanEvent::Finished(result) => {
                     let result: ScanResult = *result;
-                    let roots = self.selected_roots();
                     let agreement = self
                         .agreement
                         .clone()
                         .unwrap_or_else(AgreementRecord::sample);
-                    let report = Report::build(result, roots, agreement, self.deep_archives);
+                    let run = self.last_run.clone().unwrap_or(ScanRun {
+                        player: self.player_nick.trim().to_string(),
+                        settings: self.settings.options(vec![]).summary(),
+                        roots: self.selected_roots(),
+                    });
+                    let report =
+                        Report::build(result, run.roots, agreement, run.player, run.settings);
                     self.status = format!(
                         "Готово за {} мс: {} (балл {}). Отчёт ещё не создан - скачай сам.",
                         report.result.stats.duration_ms,
@@ -235,7 +327,11 @@ impl App {
             self.status = "Сначала выполни проверку.".into();
             return;
         };
-        let default_name = format!("{}.swcc", report.id);
+        let default_name = if report.player.is_empty() {
+            format!("{}.swcc", report.id)
+        } else {
+            format!("{}-{}.swcc", report.player, report.id)
+        };
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Sunrise Worlds report", &["swcc"])
             .set_file_name(&default_name);
@@ -264,21 +360,46 @@ impl App {
         };
         match paths::accept_manual_root(&path) {
             Ok(root) => {
+                if self.roots.iter().any(|r| r.path.eq_ignore_ascii_case(&root.path)) {
+                    self.status = format!(
+                        "Эта папка уже в списке: {}",
+                        paths::shown_path(&root.path)
+                    );
+                    return;
+                }
+                let shown = paths::shown_path(&root.path);
+                self.status = if root.kind.is_game() {
+                    format!("Добавлена папка игры: {shown}")
+                } else {
+                    format!("Добавлено - обход только по именам и размерам: {shown}")
+                };
                 let index = self.roots.len();
                 self.roots.push(root);
                 self.picked.insert(index);
-                self.status = format!("Добавлена папка: {}", path.display());
             }
             Err(reason) => self.status = format!("Папка отклонена: {reason}"),
         }
     }
 
+    /// Перепоиск папок игры. То, что игрок добавил сам, остаётся в списке.
     fn refresh_roots(&mut self) {
-        self.roots = paths::discover_roots();
+        let mut roots = paths::discover_roots();
+        for manual in self
+            .roots
+            .iter()
+            .filter(|r| matches!(r.kind, RootKind::Manual | RootKind::Drive))
+            .cloned()
+        {
+            if !roots.iter().any(|r| r.path.eq_ignore_ascii_case(&manual.path)) {
+                roots.push(manual);
+            }
+        }
+        self.roots = roots;
         self.picked = (0..self.roots.len()).collect();
         self.drive_roots = paths::computer_roots();
+        self.picked_drives = HashSet::new();
         self.status = format!(
-            "Найдено папок игры: {}, дисков: {}.",
+            "Папок игры в списке: {}, дисков найдено: {}.",
             self.roots.len(),
             self.drive_roots.len()
         );
@@ -296,18 +417,17 @@ impl App {
         egui::CentralPanel::default()
             .frame(backdrop())
             .show(ui, |ui| {
-                column(ui, 900.0, |ui| {
-                    ui.add_space(10.0);
+                column(ui, 1040.0, |ui| {
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        brand(ui, &logo, 56.0);
+                        brand(ui, &logo, 60.0);
                         ui.add_space(14.0);
                         ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("Sunrise Worlds Cheats Checker")
-                                    .size(23.0)
-                                    .strong()
-                                    .color(style::TEXT),
-                            );
+                            ui.label(style::heading(
+                                "Sunrise Worlds Cheats Checker",
+                                25.0,
+                                style::TEXT,
+                            ));
                             ui.label(
                                 RichText::new(format!(
                                     "проверка на признаки читов · локально · без сети · v{}",
@@ -318,15 +438,20 @@ impl App {
                             );
                         });
                     });
-                    ui.add_space(16.0);
+                    ui.add_space(14.0);
 
                     style::card(ui, style::CARD, |ui| {
                         style::lead(ui, agreement::SUMMARY);
                         ui.add_space(10.0);
+
+                        // Текста соглашения много: окно подстраивается под
+                        // высоту экрана, а не прячет его под маленьким скроллом.
+                        let reserved = 300.0;
+                        let body_height = (ui.available_height() - reserved).clamp(200.0, 780.0);
                         egui::ScrollArea::vertical()
                             .id_salt("agreement-scroll")
                             .auto_shrink([false, false])
-                            .max_height(340.0)
+                            .max_height(body_height)
                             .show(ui, |ui| {
                                 style::slab(ui, style::BG, |ui| {
                                     ui.add(
@@ -341,7 +466,9 @@ impl App {
                         ui.add_space(12.0);
                         callout(ui, style::WARN, "последствия отказа", WARNING);
                         ui.add_space(10.0);
-                        ui.checkbox(&mut checked, ACCEPT_STATEMENT);
+                        style::slab(ui, style::CARD_SOFT, |ui| {
+                            ui.checkbox(&mut checked, ACCEPT_STATEMENT);
+                        });
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if style::primary(ui, "Принять и разрешить проверку", checked).clicked()
@@ -360,7 +487,7 @@ impl App {
                             }
                         });
                     });
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                 });
             });
 
@@ -463,8 +590,8 @@ impl App {
             .show(ui, |ui| self.status_bar(ui));
 
         egui::Panel::left("scope")
-            .default_size(340.0)
-            .min_size(300.0)
+            .default_size(400.0)
+            .min_size(340.0)
             .resizable(false)
             .show_separator_line(false)
             .frame(panel(
@@ -493,17 +620,18 @@ impl App {
         let rules = self.db.rule_count();
         let verdict = self.report.as_ref().map(|r| r.result.verdict);
         let scanning = self.scanning;
+        let nick = self.player_nick.trim().to_string();
+        let run_player = self.report.as_ref().map(|r| r.player.clone());
 
         ui.horizontal(|ui| {
             brand(ui, &logo, 40.0);
             ui.add_space(10.0);
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("Sunrise Worlds Cheats Checker")
-                        .size(17.0)
-                        .strong()
-                        .color(style::TEXT),
-                );
+                ui.label(style::heading(
+                    "Sunrise Worlds Cheats Checker",
+                    17.0,
+                    style::TEXT,
+                ));
                 ui.label(
                     RichText::new(format!(
                         "v{} · база сигнатур {} · правил {} · сеть не используется",
@@ -537,13 +665,22 @@ impl App {
                             .color(style::MUTED),
                     );
                 }
+                let shown = run_player
+                    .clone()
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| nick.clone());
+                if !shown.is_empty() {
+                    style::chip(ui, format!("ник: {shown}"), style::VIOLET);
+                }
             });
         });
     }
 
     fn action_bar(&mut self, ui: &mut egui::Ui) {
         let scanning = self.scanning;
-        let can_start = !self.roots.is_empty() || self.whole_pc;
+        let nick_ok = self.nick_state().is_ok();
+        let scope_ok = !self.picked.is_empty() || !self.picked_drives.is_empty();
+        let can_start = nick_ok && scope_ok;
         let ready = self.report.is_some() && !scanning;
         let mut start = false;
         let mut abort = false;
@@ -556,6 +693,14 @@ impl App {
                 }
             } else if style::primary(ui, "Начать проверку", can_start).clicked() {
                 start = true;
+            }
+            if !scanning && !can_start {
+                let why = if !nick_ok {
+                    "сначала впиши ник слева"
+                } else {
+                    "и отметь хотя бы одну папку или диск"
+                };
+                ui.label(RichText::new(format!("Проверка недоступна: {why}.")).size(12.5).color(style::WARN));
             }
             ui.add_space(6.0);
             if style::accent_secondary(ui, "Скачать отчёт .swcc", ready).clicked() {
@@ -637,9 +782,14 @@ impl App {
         let roots = self.roots.clone();
         let picked = self.picked.clone();
         let drives = self.drive_roots.clone();
-        let mut full = self.whole_pc;
-        let mut deep = self.deep_archives;
+        let picked_drives = self.picked_drives.clone();
+        let scanning = self.scanning;
+        let walk_default = self.db.params.max_walk_files;
+        let mut s = self.settings;
+        let mut nick = self.player_nick.clone();
         let mut toggled: Vec<(usize, bool)> = Vec::new();
+        let mut drive_toggled: Vec<(usize, bool)> = Vec::new();
+        let mut drive_choice: Option<bool> = None;
         let mut refresh = false;
         let mut add = false;
 
@@ -647,6 +797,29 @@ impl App {
             .id_salt("scope-scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                style::eyebrow(ui, "ник игрока");
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut nick)
+                        .hint_text("например Steve_93")
+                        .desired_width(f32::INFINITY),
+                );
+                match player::check_nick(&nick) {
+                    Ok(clean) => ui.label(
+                        RichText::new(format!(
+                            "Ник «{clean}» попадёт в отчёт - по нему админ составляет команду бана."
+                        ))
+                        .size(11.5)
+                        .color(style::OK),
+                    ),
+                    Err(problem) => ui.label(
+                        RichText::new(format!("Без ника проверка не запустится. {problem}"))
+                            .size(11.5)
+                            .color(style::WARN),
+                    ),
+                };
+
+                ui.add_space(16.0);
                 style::eyebrow(ui, "папки игры");
                 ui.add_space(6.0);
                 if roots.is_empty() {
@@ -659,12 +832,13 @@ impl App {
                 for (i, root) in roots.iter().enumerate() {
                     let was_on = picked.contains(&i);
                     let mut on = was_on;
+                    let shown = paths::shown_path(&root.path);
                     style::slab(
                         ui,
                         if on { style::CARD } else { style::CARD_SOFT },
                         |ui| {
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut on, "").on_hover_text(&root.path);
+                                ui.checkbox(&mut on, "").on_hover_text(&shown);
                                 ui.vertical(|ui| {
                                     ui.label(
                                         RichText::new(root.label.clone())
@@ -675,7 +849,7 @@ impl App {
                                         RichText::new(format!(
                                             "{} · {}",
                                             root.kind.ru(),
-                                            shorten_path(&root.path, 30)
+                                            shorten_path(&shown, 30)
                                         ))
                                         .size(11.5)
                                         .color(style::MUTED),
@@ -698,48 +872,135 @@ impl App {
                         add = true;
                     }
                 });
+                ui.label(
+                    RichText::new(
+                        "Добавить можно любую папку: с признаками Minecraft она разбирается \
+                         полностью, без них - только по именам, размерам и датам.",
+                    )
+                    .size(11.5)
+                    .color(style::MUTED),
+                );
 
                 ui.add_space(18.0);
-                style::eyebrow(ui, "объём проверки");
+                style::eyebrow(ui, "диски");
                 ui.add_space(6.0);
                 style::slab(ui, style::CARD, |ui| {
-                    ui.checkbox(&mut full, "Проверить весь компьютер");
-                    ui.label(
-                        RichText::new(
-                            "Диски обходятся по метаданным: имя файла, путь, размер, дата. \
-                             Содержимое открывается только там, где имя уже совпало с базой \
-                             признаков, а системные папки Windows пропускаются.",
-                        )
-                        .size(11.5)
-                        .color(style::MUTED),
-                    );
-                    if full {
+                    ui.horizontal(|ui| {
+                        if style::ghost(ui, "Отметить все").clicked() {
+                            drive_choice = Some(true);
+                        }
+                        if style::ghost(ui, "Снять все").clicked() {
+                            drive_choice = Some(false);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if drives.is_empty() {
                         ui.label(
-                            RichText::new(format!(
-                                "В проверку войдут диски: {}",
-                                drives
-                                    .iter()
-                                    .map(|d| d.path.clone())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                            .size(11.5)
-                            .color(style::ACCENT),
+                            RichText::new("Диски не найдены - нажми «Обновить».")
+                                .size(11.5)
+                                .color(style::MUTED),
                         );
                     }
-                });
-
-                ui.add_space(8.0);
-                style::slab(ui, style::CARD, |ui| {
-                    ui.checkbox(&mut deep, "Глубоко распаковывать архивы");
+                    for (i, drive) in drives.iter().enumerate() {
+                        let was_on = picked_drives.contains(&i);
+                        let mut on = was_on;
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut on, RichText::new(drive.label.clone()).size(12.5))
+                                .on_hover_text("Обход только по метаданным: имена, размеры, даты.");
+                            ui.label(
+                                RichText::new(shorten_path(&drive.path, 24))
+                                    .size(11.5)
+                                    .color(style::MUTED),
+                            );
+                        });
+                        if on != was_on {
+                            drive_toggled.push((i, on));
+                        }
+                    }
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new(
-                            "Выключено - быстрее, но переименованный чит можно пропустить.",
+                            "Системные каталоги (Windows, WinSxS, Temp, $Recycle.Bin) \
+                             пропускаются, если не отключить настройку ниже.",
                         )
                         .size(11.5)
                         .color(style::MUTED),
                     );
                 });
+
+                ui.add_space(18.0);
+                style::eyebrow(ui, "настройки проверки");
+                ui.add_space(6.0);
+                ui.add_enabled_ui(!scanning, |ui| {
+                    style::slab(ui, style::CARD, |ui| {
+                        ui.checkbox(&mut s.read_content, "Читать содержимое файлов");
+                        ui.label(
+                            RichText::new(
+                                "Выключено - программа смотрит только имена, размеры и даты: \
+                                 быстрее, но переименованный клиент не увидеть.",
+                            )
+                            .size(11.5)
+                            .color(style::MUTED),
+                        );
+                        ui.checkbox(&mut s.deep_archives, "Глубоко распаковывать архивы");
+                        ui.add(
+                            egui::Slider::new(&mut s.deep_budget_mb, 32..=2048)
+                                .text("Бюджет распаковки, МБ"),
+                        );
+                        ui.checkbox(&mut s.read_logs, "Читать логи и строки запуска лаунчера");
+                        ui.label(
+                            RichText::new(
+                                "Нужно, чтобы отличить -javaagent от обычной сборки. \
+                                 Токены из строк вырезаются до записи в отчёт.",
+                            )
+                            .size(11.5)
+                            .color(style::MUTED),
+                        );
+                        ui.checkbox(&mut s.skip_system_dirs, "Пропускать системные каталоги");
+                    });
+
+                    ui.add_space(8.0);
+                    style::slab(ui, style::CARD, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut s.min_confidence, 0.0..=0.9)
+                                .text("Уверенность признака не ниже")
+                                .fixed_decimals(2),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Ниже порога находки в отчёт не пишутся: меньше ложных \
+                                 срабатываний, но и больше пропусков.",
+                            )
+                            .size(11.5)
+                            .color(style::MUTED),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut s.max_files, 0..=1_000_000)
+                                .step_by(50_000.0)
+                                .text("Лимит файлов за проход"),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "0 - как в базе сигнатур ({}); с отмеченными дисками лимит \
+                                 умножается на 8.",
+                                walk_default
+                            ))
+                            .size(11.5)
+                            .color(style::MUTED),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut s.max_file_mb, 4..=256)
+                                .text("Файл крупнее, МБ - не читаем"),
+                        );
+                    });
+                });
+                if scanning {
+                    ui.label(
+                        RichText::new("Идёт проверка: настройки применятся к следующему запуску.")
+                            .size(11.5)
+                            .color(style::ACCENT),
+                    );
+                }
 
                 ui.add_space(18.0);
                 style::slab(ui, style::BG, |ui| {
@@ -757,6 +1018,8 @@ impl App {
                 });
             });
 
+        self.player_nick = nick;
+        self.settings = s;
         for (i, on) in toggled {
             if on {
                 self.picked.insert(i);
@@ -764,18 +1027,21 @@ impl App {
                 self.picked.remove(&i);
             }
         }
-        if full != self.whole_pc {
-            self.whole_pc = full;
-            self.status = if full {
-                format!(
-                    "Проверка всего компьютера: дисков {}. Займёт больше времени.",
-                    self.drive_roots.len()
-                )
+        for (i, on) in drive_toggled {
+            if on {
+                self.picked_drives.insert(i);
             } else {
-                "Проверяются только папки игры.".to_string()
+                self.picked_drives.remove(&i);
+            }
+        }
+        if let Some(on) = drive_choice {
+            self.picked_drives = if on { (0..self.drive_roots.len()).collect() } else { HashSet::new() };
+            self.status = if on {
+                format!("Отмечены все диски: {}.", self.drive_roots.len())
+            } else {
+                "Диски сняты: проверяются только папки.".to_string()
             };
         }
-        self.deep_archives = deep;
         if refresh {
             self.refresh_roots();
         }
@@ -786,21 +1052,17 @@ impl App {
 
     fn result_view(&mut self, ui: &mut egui::Ui) {
         let report = self.report.clone();
-        let whole_pc = self.whole_pc;
-        let disks = self.drive_roots.len();
+        let roots = self.last_run.clone().map(|r| r.roots).unwrap_or_default();
+        let drives = roots.iter().filter(|r| !r.kind.is_game()).count();
+        let player = report.as_ref().map(|r| r.player.clone()).unwrap_or_default();
 
         let Some(report) = report else {
             style::card(ui, style::CARD, |ui| {
-                ui.label(
-                    RichText::new("Заключения пока нет")
-                        .size(20.0)
-                        .strong()
-                        .color(style::TEXT),
-                );
+                ui.label(style::heading("Заключения пока нет", 20.0, style::TEXT));
                 ui.add_space(6.0);
                 style::lead(
                     ui,
-                    "Отметь слева папки игры - и, если нужно, весь компьютер - затем нажми \
+                    "Впи слева ник, отметь папки игры (и диски, если нужно) - затем нажми \
                      «Начать проверку». Здесь появится заключение, а файл отчёта нужно будет \
                      скачать и передать админу.",
                 );
@@ -808,7 +1070,7 @@ impl App {
                 for line in [
                     "Согласие действует только на этот запуск: при следующем окно спросит заново.",
                     "Программа ничего никуда не отправляет - отчёт остаётся у тебя на диске.",
-                    "Список найденных файлов, путей и хэшей пишется в файл .swcc, его читает админ.",
+                    "В отчёт попадают ник, найденные файлы и их размеры - читает его админ.",
                     "Чистый результат не доказывает честность: самописный чит можно не увидеть.",
                 ] {
                     ui.label(RichText::new(format!("· {line}")).size(13.5).color(style::MUTED));
@@ -824,19 +1086,14 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("●").size(28.0).color(color));
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(result.verdict.ru())
-                            .size(26.0)
-                            .strong()
-                            .color(color),
-                    );
+                    ui.label(style::heading(result.verdict.ru(), 26.0, color));
                     let count = if result.findings.is_empty() {
                         "прямых совпадений не найдено".to_string()
                     } else {
                         format!("совпадений с базой: {}", result.findings.len())
                     };
                     ui.label(
-                        RichText::new(format!("балл риска {} · {}", result.score, count))
+                        RichText::new(format!("ник {player} · балл риска {} · {}", result.score, count))
                             .size(13.5)
                             .color(style::TEXT),
                     );
@@ -852,15 +1109,17 @@ impl App {
                 stat(ui, "файлов просмотрено", &result.stats.files_walked.to_string());
                 stat(ui, "находок", &result.findings.len().to_string());
                 stat(ui, "отброшено как легитимное", &result.stats.suppressed.to_string());
-                stat(ui, "хэшей посчитано", &result.stats.files_hashed.to_string());
+                stat(ui, "длительность, мс", &result.stats.duration_ms.to_string());
             });
-            if whole_pc {
+            if drives > 0 {
                 ui.add_space(10.0);
                 ui.label(
                     RichText::new(format!(
-                        "Режим проверки всего компьютера: дисков {}, системных каталогов \
+                        "Корней в проверке: {} (из них дисков {}). Системных каталогов \
                          пропущено {}.",
-                        disks, result.stats.dirs_pruned_system
+                        roots.len(),
+                        drives,
+                        result.stats.dirs_pruned_system
                     ))
                     .size(12.5)
                     .color(style::MUTED),
@@ -880,6 +1139,10 @@ impl App {
             );
             ui.add_space(12.0);
             severity_chips(ui, &result);
+            ui.add_space(10.0);
+            for line in &report.settings {
+                ui.label(RichText::new(format!("· {line}")).size(12.0).color(style::MUTED));
+            }
             if !result.warnings.is_empty() {
                 ui.add_space(10.0);
                 for w in &result.warnings {
@@ -903,21 +1166,18 @@ impl App {
         let db = self.db.clone();
         let db_dir = self.db_dir.join("custom.toml");
         let limit = self.walk_limit();
-        let whole_pc = self.whole_pc;
+        let drives = self.picked_drives.len();
+        let s = self.settings;
 
         style::card(ui, style::CARD, |ui| {
-            ui.label(
-                RichText::new("Как ищет проверка")
-                    .size(20.0)
-                    .strong()
-                    .color(style::TEXT),
-            );
+            ui.label(style::heading("Как ищет проверка", 20.0, style::TEXT));
             ui.add_space(8.0);
             style::lead(
                 ui,
-                "Сканер сравнивает то, что видит в папках игры, с базой известных признаков \
+                "Сканер сравнивает то, что видит в выбранных папках, с базой известных признаков \
                  чит-клиентов: имена и пути файлов, содержимое jar-архивов и классы внутри них, \
-                 нативные библиотеки, строки запуска лаунчера, хэши файлов.",
+                 нативные библиотеки, строки запуска лаунчера. Ник, который ты вписал слева, \
+                 пишется в отчёт - по нему администрация понимает, к кому относится результат.",
             );
             ui.add_space(8.0);
             ui.label(
@@ -939,6 +1199,39 @@ impl App {
                 .size(13.5)
                 .color(style::MUTED),
             );
+            ui.add_space(10.0);
+            for line in [
+                format!(
+                    "Содержимое файлов: {}",
+                    if s.read_content { "читается" } else { "только имена и размеры" }
+                ),
+                format!(
+                    "Архивы: {}",
+                    if s.deep_archives {
+                        format!("распаковываются глубоко, бюджет {} МБ", s.deep_budget_mb)
+                    } else {
+                        "только имена записей".to_string()
+                    }
+                ),
+                format!(
+                    "Логи и строки запуска: {}",
+                    if s.read_logs { "читаются" } else { "не читаются" }
+                ),
+                format!("Минимальная уверенность признака: {:.2}", s.min_confidence),
+                format!(
+                    "Дисков отмечено: {}{}.",
+                    drives,
+                    if drives > 0 && !s.skip_system_dirs {
+                        ", системные каталоги не пропускаются"
+                    } else if drives > 0 {
+                        ", системные каталоги пропускаются"
+                    } else {
+                        ""
+                    }
+                ),
+            ] {
+                ui.label(RichText::new(format!("· {line}")).size(13.0).color(style::MUTED));
+            }
         });
 
         ui.add_space(12.0);
@@ -965,8 +1258,8 @@ impl App {
                     "Лимиты обхода: {} файлов{}; чтение содержимого до {} МБ, распаковка \
                      архива до {} МБ.",
                     db.params.max_walk_files,
-                    if whole_pc {
-                        format!(" ({} при проверке всего компьютера)", limit)
+                    if drives > 0 {
+                        format!(" ({} с отмеченными дисками)", limit)
                     } else {
                         String::new()
                     },
@@ -996,7 +1289,7 @@ impl App {
                 "Токены из строк запуска (--accessToken, --xuid, --clientId) вырезаются до записи в отчёт.",
                 "Браузер, пароли, переписка, буфер обмена, документы, фото, скриншоты и клавиатура не читаются.",
                 "Каталоги assets, libraries, runtime и нативок не обходятся: они огромные и легитимные.",
-                "При проверке всего компьютера содержимое файла открывается только после совпадения имени с базой.",
+                "Вне папок игры содержимое файла открывается только после совпадения имени или пути с базой.",
                 "Самописный или пересобранный чит можно не увидеть: чистый отчёт - не доказательство честной игры.",
             ] {
                 ui.label(RichText::new(format!("· {line}")).size(13.0).color(style::MUTED));
@@ -1125,33 +1418,52 @@ fn dirs_downloads() -> Option<PathBuf> {
     Some(if downloads.is_dir() { downloads } else { home })
 }
 
-/// Кириллица и моноширинный шрифт: без этого текст соглашения в egui разъезжается,
-/// а часть символов пропадает.
+/// Inter вшит в exe: интерфейс выглядит одинаково на любой машине и не зависит
+/// от того, какие шрифты стоят в Windows. Полужирное начертание - отдельное
+/// семейство "Inter SemiBold": в egui `.strong()` меняет только цвет, не вес.
+/// Моноширинный (текст соглашения, пути) берётся из системы, с запасным.
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let candidates = [
+    let embedded = [
+        ("Inter", include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+        (
+            "Inter SemiBold",
+            include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice(),
+        ),
+    ];
+    for (name, bytes) in embedded {
+        fonts
+            .font_data
+            .insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
+    }
+    fonts.families.insert(
+        egui::FontFamily::Name("Inter SemiBold".into()),
+        vec!["Inter SemiBold".to_owned()],
+    );
+
+    let mut fallback: Vec<String> = Vec::new();
+    let mut monospace: Vec<String> = Vec::new();
+    for (key, path, is_proportional) in [
         ("segoe", "C:\\Windows\\Fonts\\segoeui.ttf", true),
         ("arial", "C:\\Windows\\Fonts\\arial.ttf", true),
         ("consolas", "C:\\Windows\\Fonts\\consola.ttf", false),
         ("courier", "C:\\Windows\\Fonts\\cour.ttf", false),
-    ];
-    let mut proportional: Vec<String> = Vec::new();
-    let mut monospace: Vec<String> = Vec::new();
-    for (key, path, is_proportional) in candidates {
+    ] {
         if let Ok(bytes) = std::fs::read(path) {
             fonts
                 .font_data
                 .insert(key.to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
             if is_proportional {
-                proportional.push(key.to_owned());
+                fallback.push(key.to_owned());
             } else {
                 monospace.push(key.to_owned());
             }
         }
     }
-    for name in proportional {
-        if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            list.insert(0, name);
+    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        list.insert(0, "Inter".to_owned());
+        for name in fallback {
+            list.push(name);
         }
     }
     for name in monospace {

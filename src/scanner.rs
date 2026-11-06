@@ -33,8 +33,6 @@ pub struct FileEvidence {
     pub rel_path: String,
     pub size_bytes: u64,
     pub modified: String,
-    #[serde(default)]
-    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +90,6 @@ pub struct InventoryEntry {
     pub name: String,
     pub rel_path: String,
     pub size_bytes: u64,
-    #[serde(default)]
-    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -116,8 +112,6 @@ pub struct ScanStats {
     pub archives_opened: u64,
     pub archives_deep_scanned: u64,
     pub archives_skipped_by_budget: u64,
-    pub files_hashed: u64,
-    pub hash_bytes: u64,
     pub files_too_large: u64,
     pub files_unreadable: u64,
     pub symlinks_skipped: u64,
@@ -161,10 +155,11 @@ impl Verdict {
                 "Совпадения слабые или единичные. Бан по такому отчёту не обоснован."
             }
             Verdict::Suspicious => {
-                "Нужна ручная проверка: запроси файлы по хэшам и сравни с официальными релизами."
+                "Нужна ручная проверка: запроси названные файлы и сравни их с официальными релизами."
             }
             Verdict::HighRisk => {
-                "Несколько независимых признаков одного семейства либо критическое совпадение по хэшу. Вероятность чит-клиента высокая - проверяй хэши перед решением."
+                "Несколько независимых признаков одного семейства либо критическое совпадение. \
+                 Вероятность чит-клиента высокая - проверяй находки вручную перед решением."
             }
         }
     }
@@ -185,23 +180,90 @@ pub struct FamilySummary {
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub roots: Vec<GameRoot>,
+    /// Читать байты файлов в игровых папках. Выключено - только имена, размеры
+    /// и даты: быстрее, но переименованный клиент не увидеть.
+    pub read_content: bool,
+    /// Разбирать архивы: имена записей внутри jar и содержимое классов.
     pub deep_archives: bool,
     pub deep_budget_bytes: u64,
+    /// Бюджет на контрольные суммы, которые нужны только для сопоставления с
+    /// базой: в отчёт они не попадают.
     pub hash_budget_bytes: u64,
-    /// Проверка всего компьютера: обход дисков по именам и атрибутам.
-    /// Содержимое файлов читается только там, где уже есть зацепка.
-    pub whole_pc: bool,
+    /// Читать логи и файлы запуска: строки запуска лаунчера, версии Java.
+    pub read_logs: bool,
+    /// Признаки с уверенностью ниже этого значения в отчёт не пишутся.
+    pub min_confidence: f32,
+    /// Сколько файлов пройти максимум. 0 - значение из базы сигнатур.
+    pub max_files: u64,
+    /// Файлы крупнее этого не читают. 0 - значение из базы сигнатур.
+    pub max_file_bytes: u64,
+    /// Пропускать системные каталоги при обходе дисков.
+    pub skip_system_dirs: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             roots: Vec::new(),
+            read_content: true,
             deep_archives: true,
             deep_budget_bytes: 384 * 1024 * 1024,
             hash_budget_bytes: 1024 * 1024 * 1024,
-            whole_pc: false,
+            read_logs: true,
+            min_confidence: 0.35,
+            max_files: 0,
+            max_file_bytes: 0,
+            skip_system_dirs: true,
         }
+    }
+}
+
+impl ScanOptions {
+    /// Есть ли в списке корни, которые обходятся только по метаданным.
+    pub fn has_wide_roots(&self) -> bool {
+        self.roots.iter().any(|r| !r.kind.is_game())
+    }
+
+    /// Что именно было включено - это попадает в отчёт, чтобы админ понимал,
+    /// насколько полной была проверка.
+    pub fn summary(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        out.push(format!(
+            "Чтение содержимого файлов: {}",
+            if self.read_content { "включено" } else { "выключено - только имена и размеры" }
+        ));
+        out.push(format!(
+            "Разбор архивов (jar/zip): {}",
+            if self.deep_archives {
+                format!(
+                    "глубоко, бюджет распаковки {} МБ",
+                    self.deep_budget_bytes / (1024 * 1024)
+                )
+            } else {
+                "только имена записей".to_string()
+            }
+        ));
+        out.push(format!(
+            "Логи и строки запуска лаунчера: {}",
+            if self.read_logs { "читаются" } else { "не читаются" }
+        ));
+        out.push(format!(
+            "Минимальная уверенность признака: {:.0}%",
+            self.min_confidence * 100.0
+        ));
+        out.push(format!(
+            "Обход дисков: {}",
+            if self.has_wide_roots() {
+                if self.skip_system_dirs {
+                    "по метаданным, системные каталоги пропущены"
+                } else {
+                    "по метаданным, системные каталоги тоже обойдены"
+                }
+            } else {
+                "не запрашивался"
+            }
+        ));
+        out
     }
 }
 
@@ -589,7 +651,6 @@ pub struct Scanner<'a> {
     mc_versions: HashSet<String>,
     deep_budget: u64,
     hash_budget: u64,
-    budget_hash_skipped: u64,
     game_scoped: bool,
 }
 
@@ -617,16 +678,25 @@ impl<'a> Scanner<'a> {
             mc_versions: HashSet::new(),
             deep_budget: opts.deep_budget_bytes,
             hash_budget: opts.hash_budget_bytes,
-            budget_hash_skipped: 0,
             game_scoped: true,
         }
     }
 
     fn walk_limit(&self) -> u64 {
-        if self.opts.whole_pc {
-            self.db.params.max_walk_files * 8
+        let base = if self.opts.max_files > 0 {
+            self.opts.max_files
         } else {
             self.db.params.max_walk_files
+        };
+        if self.opts.has_wide_roots() { base * 8 } else { base }
+    }
+
+    /// Больше этого файла содержимое не читаем: не нужно и слишком долго.
+    fn content_cap(&self) -> u64 {
+        if self.opts.max_file_bytes > 0 {
+            self.opts.max_file_bytes
+        } else {
+            self.db.params.max_content_bytes
         }
     }
 
@@ -729,7 +799,10 @@ impl<'a> Scanner<'a> {
             }
             let rel_lower = rel.to_ascii_lowercase();
             let name_lower = name.to_ascii_lowercase();
-            if !self.game_scoped && SYSTEM_SKIP_DIRS.contains(&name_lower.as_str()) {
+            if self.opts.skip_system_dirs
+                && !self.game_scoped
+                && SYSTEM_SKIP_DIRS.contains(&name_lower.as_str())
+            {
                 self.stats.dirs_pruned_system += 1;
                 continue;
             }
@@ -757,7 +830,6 @@ impl<'a> Scanner<'a> {
                             root: label.to_string(),
                             rel_path: rel.clone(),
                         },
-                        None,
                     );
                 }
                 self.walk_dir(root, &path, &rel, depth + 1, label, tx, cancel);
@@ -812,27 +884,23 @@ impl<'a> Scanner<'a> {
 
         // Вне игровых папок содержимое файла читаем только если имя или путь
         // уже дали зацепку: иначе проверка диска превратилась бы в чтение всего.
-        let probe = self.game_scoped || !sink.is_empty();
+        let probe = (self.game_scoped && self.opts.read_content) || !sink.is_empty();
 
-        let want_hash = probe
+        // Контрольная сумма файла нужна только для сверки с базой известных
+        // признаков. В отчёт она не попадает: там нет и никогда не было хэшей.
+        if probe
             && (archive || native)
-            && size <= self.db.params.max_content_bytes
-            && (in_inventory_dir(rel) || !sink.is_empty() || size <= 8 * 1024 * 1024);
-        let hash = if want_hash {
-            sha256_hex(path, &mut self.hash_budget)
-        } else {
-            if size <= self.db.params.max_content_bytes {
-                self.budget_hash_skipped += 1;
-            }
-            None
-        };
-        if let Some(h) = &hash {
-            if let Some(ids) = self.idx.hash.get(h) {
+            && size <= self.content_cap()
+            && (in_inventory_dir(rel) || !sink.is_empty() || size <= 8 * 1024 * 1024)
+        {
+            if let Some(h) = sha256_hex(path, &mut self.hash_budget)
+                && let Some(ids) = self.idx.hash.get(&h)
+            {
                 for id in ids {
                     sink.add(
                         *id,
                         RuleKind::KnownHash,
-                        h.clone(),
+                        rel.to_string(),
                         self.db.signatures[*id].confidence,
                     );
                 }
@@ -841,7 +909,7 @@ impl<'a> Scanner<'a> {
 
         // 1) Сырые байты: имена записей архива и манифесты лежат открытым текстом.
         if probe && (archive || native) {
-            if let Some(bytes) = read_capped(path, self.db.params.max_content_bytes) {
+            if let Some(bytes) = read_capped(path, self.content_cap()) {
                 let body = as_text(&bytes);
                 let raw = self.idx.raw_magic.clone();
                 if let Some(mi) = raw {
@@ -856,7 +924,7 @@ impl<'a> Scanner<'a> {
         }
 
         // 2) Текстовые файлы и логи запуска.
-        if probe && text {
+        if probe && text && (!log_source(name) || self.opts.read_logs) {
             if let Some(bytes) = read_capped(path, self.db.params.max_text_bytes) {
                 let body = as_text(&bytes);
                 for r in &self.idx.text {
@@ -899,7 +967,7 @@ impl<'a> Scanner<'a> {
             && (!sink.is_empty()
                 || (self.opts.deep_archives && in_inventory_dir(rel) && self.deep_budget > 0));
         if candidate_needs_content {
-            if size > self.db.params.max_content_bytes {
+            if size > self.content_cap() {
                 self.stats.files_too_large += 1;
             } else if self.deep_budget == 0 && !self.opts.deep_archives {
                 self.stats.archives_skipped_by_budget += 1;
@@ -916,9 +984,8 @@ impl<'a> Scanner<'a> {
                 rel_path: rel.to_string(),
                 size_bytes: size,
                 modified: mtime_iso(&meta),
-                sha256: hash.clone(),
             });
-            self.commit(&sink, name, rel, evidence, hash);
+            self.commit(&sink, name, rel, evidence);
         }
     }
 
@@ -1009,10 +1076,12 @@ impl<'a> Scanner<'a> {
         name: &str,
         rel: &str,
         evidence: Evidence,
-        hash: Option<String>,
     ) {
         for (sig_id, rules) in &sink.0 {
             let sig = &self.db.signatures[*sig_id];
+            if sig.confidence < self.opts.min_confidence {
+                continue;
+            }
             let mut evidence = evidence.clone();
             // Совпадение только по строке запуска - это не "файл-чит", а
             // аргумент в логе/профиле: показываем саму строку, а не файл.
@@ -1061,9 +1130,6 @@ impl<'a> Scanner<'a> {
             } else {
                 sig.severity
             };
-            if let Evidence::File(f) = &mut evidence {
-                f.sha256 = hash.clone();
-            }
             self.findings.push(Finding {
                 sig_id: sig.id.to_string(),
                 family: sig.family.clone(),
@@ -1088,24 +1154,9 @@ impl<'a> Scanner<'a> {
             name: name.to_string(),
             rel_path: rel.to_string(),
             size_bytes: meta.len(),
-            sha256: None,
         };
         if rel_lower.contains("/mods/") || rel_lower.starts_with("mods/") {
-            if let Some(existing) = self
-                .findings
-                .iter()
-                .find(|f| f.location().eq_ignore_ascii_case(rel))
-                .and_then(|f| match &f.evidence {
-                    Evidence::File(file) => file.sha256.clone(),
-                    _ => None,
-                })
-            {
-                let mut e = entry;
-                e.sha256 = Some(existing);
-                self.mods.push(e);
-            } else {
-                self.mods.push(entry);
-            }
+            self.mods.push(entry);
         } else if rel_lower.starts_with("resourcepacks/") || rel_lower.contains("/resourcepacks/")
         {
             self.packs.push(entry);
@@ -1164,14 +1215,6 @@ impl<'a> Scanner<'a> {
             v.sort();
             v
         };
-        if self.budget_hash_skipped > 0 {
-            self.warnings.push(format!(
-                "Хэш не вычислен для {} файлов: исчерпан бюджет хэширования {} МБ.",
-                self.budget_hash_skipped,
-                self.opts.hash_budget_bytes / (1024 * 1024)
-            ));
-        }
-
         let families = summarize_families(&self.findings);
         let score = scored_total(&self.findings);
         let max_conf = self

@@ -59,7 +59,7 @@ severity = "critical"
 confidence = 0.95
 weight = 60
 explain = "Meteor Client - open-source чит-клиент для Fabric. Артефакты сборки, классы и каталог конфига."
-verify = "Запросить сам .jar по хэшу и сравнить с официальными релизами Meteor - совпадения не будет."
+verify = "Запросить у игрока этот .jar и сравнить с официальными релизами Meteor - совпадения не будет."
 name_regex = '(?i)^meteor[-_ ]?client([-_.0-9a-z]+)?\.jar$'
 path_regex = '(^|/)(mods|addons)/meteor[-_ ]?client'
 jar_entry_regex = '(?i)^com/meteorclient/(MeteorClient|Addons)\.class$'
@@ -116,7 +116,7 @@ severity = "critical"
 confidence = 0.93
 weight = 58
 explain = "LiquidBounce - open-source чит-клиент (Forge/Vanilla) с killaura, reach, fly."
-verify = "Запросить jar по хэшу, проверить наличие модулей KillAura/Target/SmoothElytra."
+verify = "Запросить сам jar, открыть его и проверить наличие модулей KillAura/Target/SmoothElytra."
 name_regex = '(?i)^liquid[-_ ]?bounce([-_.0-9a-z]+)?\.jar$'
 jar_entry_regex = '(?i)^net/ccbluex/liquidbounce/'
 jar_content_magic = ["liquidbounce", "ccbluex"]
@@ -249,7 +249,7 @@ severity = "high"
 confidence = 0.7
 weight = 40
 explain = "Jar с кодом чит-клиента внутри, переименованный под безобидное имя (частый приём маскировки)."
-verify = "Сравнить хэш с официальным релизом мода с тем же именем. Не совпал - файл пересобран."
+verify = "Сравнить файл с официальным релизом мода с тем же именем. Не совпал - файл пересобран."
 path_regex = '(^|/)(mods|addons)/[^/]*(optimi[sz]er|fastload|speedup|boost|utility|enhancer|tweaker)[-_.0-9a-z]*\.jar$'
 jar_content_magic = ["meteorclient", "wurstclient", "baritone", "liquidbounce"]
 
@@ -342,7 +342,7 @@ severity = "high"
 confidence = 0.7
 weight = 40
 explain = "В аргументах запуска игры есть -javaagent на jar, который не относится к известным легитимным мод-лоадерам. Чит-клиенты внедряются именно агентом."
-verify = "Сверить названный в логе jar по хэшу. Легитимный агент - обычно fabric-loader, forge, optifine, lunar."
+verify = "Сверить названный в логе jar с официальным релизом. Легитимный агент - обычно fabric-loader, forge, optifine, lunar."
 log_regex = '-javaagent:[^\r\n"]+\.jar'
 
 [[signature]]

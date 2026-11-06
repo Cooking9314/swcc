@@ -4,6 +4,7 @@ mod app;
 mod agreement;
 mod icon_data;
 mod paths;
+mod player;
 mod scanner;
 mod signatures;
 mod style;
@@ -29,11 +30,14 @@ Sunrise Worlds Cheats Checker (swcc)
         Проверить целостность полученного отчёта (payload + печать).
         Код возврата 0 - цел, 2 - файл правили или он не .swcc.
 
-  swcc scan <папка игры> [...] --i-accept [--out файл.swcc] [--no-deep] [--full]
+  swcc scan --player <ник> <папка> [...] --i-accept [--out файл.swcc]
+            [--no-deep] [--no-content] [--no-logs] [--full]
         Проверка без окна. Соглашение при этом читается в консоль, а флаг
         --i-accept означает, что игрок согласен: без него сканер не запустится.
-        Несколько папок через пробел. --no-deep - не распаковывать архивы.
-        --full - дополнительно обойти все диски (по метаданным).
+        --player обязателен: ник попадает в отчёт. Несколько папок через пробел -
+        годится любая папка, но без признаков игры обход будет по метаданным.
+        --no-deep - не распаковывать архивы. --no-content - только имена и размеры.
+        --no-logs - не читать логи и строки запуска. --full - обойти диски целиком.
 
   swcc help
 ";
@@ -103,7 +107,8 @@ fn cli_verify(args: &[String]) -> i32 {
     if let Some(report) = outcome.report {
         println_report_summary(&report.result);
         println!(
-            "Согласие: {} (текст {}) · папок проверено: {}",
+            "Игрок: {} · согласие: {} (текст {}) · корней проверено: {}",
+            if report.player.is_empty() { "не указан" } else { &report.player },
             report.agreement.accepted_at,
             report.agreement.text_version,
             report.roots.len()
@@ -119,14 +124,20 @@ fn cli_verify(args: &[String]) -> i32 {
 fn cli_scan(args: &[String]) -> i32 {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut out: Option<PathBuf> = None;
+    let mut nick = String::new();
     let mut deep = true;
+    let mut content = true;
+    let mut logs = true;
     let mut accepted = false;
     let mut full = false;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--out" => out = iter.next().map(PathBuf::from),
+            "--player" => nick = iter.next().map(String::as_str).unwrap_or_default().to_string(),
             "--no-deep" => deep = false,
+            "--no-content" => content = false,
+            "--no-logs" => logs = false,
             "--full" => full = true,
             "--i-accept" => accepted = true,
             other if other.starts_with("--") => {
@@ -136,6 +147,15 @@ fn cli_scan(args: &[String]) -> i32 {
             other => dirs.push(PathBuf::from(other)),
         }
     }
+
+    // Ник спрашивается до всего остального: отчёт без него ни о чём не говорит.
+    let player_nick = match player::check_nick(&nick) {
+        Ok(nick) => nick,
+        Err(problem) => {
+            eprintln!("Нужен ник игрока (--player <ник>): {problem}");
+            return 1;
+        }
+    };
 
     if dirs.is_empty() {
         dirs = paths::discover_roots()
@@ -177,7 +197,7 @@ fn cli_scan(args: &[String]) -> i32 {
         let game = roots.len();
         roots.extend(paths::computer_roots());
         println!(
-            "Проверка всего компьютера: добавлено дисков {}, папок игры {}",
+            "Обход дисков: добавлено дисков {}, папок игры {}",
             roots.len() - game,
             game
         );
@@ -189,8 +209,9 @@ fn cli_scan(args: &[String]) -> i32 {
     let db = SignatureDb::load(db_dir.as_deref().filter(|d| d.exists()));
     let opts = ScanOptions {
         roots: roots.clone(),
+        read_content: content,
         deep_archives: deep,
-        whole_pc: full,
+        read_logs: logs,
         ..Default::default()
     };
     let (tx, rx) = std::sync::mpsc::channel();
@@ -215,7 +236,8 @@ fn cli_scan(args: &[String]) -> i32 {
         result,
         roots,
         agreement::AgreementRecord::accept(),
-        deep,
+        player_nick,
+        opts.summary(),
     );
     let path = out.unwrap_or_else(|| PathBuf::from(format!("{}.swcc", report.id)));
     match report.write(&path) {
