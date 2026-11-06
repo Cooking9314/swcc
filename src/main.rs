@@ -168,7 +168,7 @@ fn cli_scan(args: &[String]) -> i32 {
         }
         println!("Автопоиск нашёл папки:");
         for d in &dirs {
-            println!("  {}", d.display());
+            println!("  {}", paths::shown_path(&d.to_string_lossy()));
         }
     }
 
