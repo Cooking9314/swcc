@@ -1,0 +1,475 @@
+# ============================================================================
+#  Sunrise Worlds Cheats Checker - база сигнатур (умолчанию)
+# ============================================================================
+#  Встроена в .exe как fallback. Если рядом со swcc.exe лежит файл
+#  signatures\custom.toml - он дополняет и переопределяет эту базу, поэтому
+#  обновлять сигнатуры можно без перекомпиляции.
+#
+#  Правила внутри одной сигнатуры работают по ИЛИ: сработало любое - находка.
+#  Сработало несколько - уверенность складывается (1 - произведение (1-c)).
+#  Исключения ([[exclude]]) гасят находки, если имя/путь файла совпал.
+#
+#  Поля правила (хотя бы одно обязательно):
+#    name_regex         регулярка против ИМЕНИ файла
+#    path_regex         регулярка против ОТНОСИТЕЛЬНОГО пути к файлу
+#    dir_regex          регулярка против относительного пути к КАТАЛОГУ
+#    content_magic      подстроки (в нижнем регистре) в сырых байтах файла.
+#                       Работает и внутри .jar: имена записей архива лежат
+#                       в нём открытым текстом, даже когда код сжат.
+#    jar_entry_regex    регулярка против имён записей внутри архива
+#    jar_content_magic  подстроки в РАСПАКОВАННЫХ байтах записей архива
+#    text_regex         регулярка против содержимого мелких текстовых файлов
+#                       (.json .toml .cfg .conf .ini .txt .yml .properties)
+#    log_regex          регулярка только против logs/latest.log
+#    sha256             известные "грязные" хэши файлов
+#
+#  confidence: 0..1 | severity: critical|high|medium|low|info
+#  kind: cheat_client|autoclicker|xray|macro|injection|cracked_launcher|
+#        grey_helper|config_leftover
+# ============================================================================
+
+[meta]
+version = "2026.11.06-1"
+notes = "Базовая сигнатура. Требует поддержки администратором."
+
+[scan]
+# Не обходим: огромные и заведомо легитимные каталоги.
+skip_dir_names = ["assets", "libraries", "runtime", "bin", "web", "Hiramods_ArmorAPI"]
+# Puu-каталоги нативок LWJGL - там dll легитимны.
+skip_path_regex = ['(^|/)[^/]*natives([^/]*)?(/|$)', '(^|/)versions/[^/]+/[^/]+\.jar$']
+max_walk_files = 250000
+# Файлы больше этого размера не читаем (только метаданные, имя и путь).
+max_content_bytes = 33554432
+# Сколько распакованных байт архива суммарно проверяем на один архив.
+max_archive_scan_bytes = 25165824
+# Сколько записей архива разбираем.
+max_archive_entries = 4000
+# Текстовые файлы больше этого размера текстовыми правилами не проверяем.
+max_text_bytes = 2097152
+
+# ---------------------------------------------------------------------------
+# ЧИТ-КЛИЕНТЫ
+# ---------------------------------------------------------------------------
+
+[[signature]]
+id = "meteor.client"
+family = "Meteor Client"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.95
+weight = 60
+explain = "Meteor Client - open-source чит-клиент для Fabric. Артефакты сборки, классы и каталог конфига."
+verify = "Запросить сам .jar по хэшу и сравнить с официальными релизами Meteor - совпадения не будет."
+name_regex = '(?i)^meteor[-_ ]?client([-_.0-9a-z]+)?\.jar$'
+path_regex = '(^|/)(mods|addons)/meteor[-_ ]?client'
+jar_entry_regex = '(?i)^com/meteorclient/(MeteorClient|Addons)\.class$'
+jar_content_magic = ["meteorclient", "meteor development", "meteor client"]
+dir_regex = '(^|/)config/meteor[-_]?client(/|$)'
+
+[[signature]]
+id = "meteor.addon"
+family = "Meteor Addon"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.8
+weight = 35
+explain = "Сторонний аддон к Meteor. Аддоны бывают и безобидные, но большинство - модули чита."
+verify = "Открыть аддон и посмотреть список модулей: aim/aura/killaura/reach - это чит."
+name_regex = '(?i)^meteor[-_ ]?(addon|addons)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["meteorclient.addon", "extends addon", "meteorclient.api"]
+
+[[signature]]
+id = "wurst.client"
+family = "Wurst Client"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.95
+weight = 60
+explain = "Wurst Client - самый массовый чит-клиент. Встроенный Mod Manager доустанавливает читы сам."
+verify = "Проверить wurst/config.json и список модов, которые Wurst докачал автоматически."
+name_regex = '(?i)^wurst([-_.0-9a-z]+)?\.jar$'
+jar_entry_regex = '(?i)^net/minecraftsrc/wurst/|^com/(github|gamesales)/wurst/'
+jar_content_magic = ["wurst client", "wurstclient", "wurst mod manager"]
+dir_regex = '(^|/)(wurst|config/wurst)(/|$)'
+text_regex = '(?i)"(wurst|wurstclient)"'
+
+[[signature]]
+id = "baritone"
+family = "Baritone"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.85
+weight = 45
+explain = "Baritone - автономный бот: автоматическая копка руды, путь к цели, автоматическое преследование."
+verify = "Смотреть settings.json: allowMine, allowParkour, mineCost - это автоматизация игры."
+name_regex = '(?i)^baritone([-_.0-9a-z]+)?\.jar$'
+jar_entry_regex = '(?i)^baritone/(api|behavior|process)/'
+jar_content_magic = ["baritone", "berniebeneficial"]
+dir_regex = '(^|/)baritone(/|$)'
+text_regex = '(?i)"(allowMine|allowParkour|allowBreak|mineLayers|startAtLevel)"'
+
+[[signature]]
+id = "liquidbounce"
+family = "LiquidBounce"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.93
+weight = 58
+explain = "LiquidBounce - open-source чит-клиент (Forge/Vanilla) с killaura, reach, fly."
+verify = "Запросить jar по хэшу, проверить наличие модулей KillAura/Target/SmoothElytra."
+name_regex = '(?i)^liquid[-_ ]?bounce([-_.0-9a-z]+)?\.jar$'
+jar_entry_regex = '(?i)^net/ccbluex/liquidbounce/'
+jar_content_magic = ["liquidbounce", "ccbluex"]
+dir_regex = '(^|/)config/liquidbounce(/|$)'
+
+[[signature]]
+id = "impact.client"
+family = "Impact Client"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.9
+weight = 55
+explain = "Impact / 4Impact / Impact Plus - чит-клиент с форками."
+verify = "Многие форки (Plus) добавляют обфусцированный код: смотреть не только имя, но и содержимое."
+name_regex = '(?i)^(gg\.impact|impact([-_. ]?(plus|4|pro))?)[-_.0-9a-z]*\.jar$'
+jar_entry_regex = '(?i)^gg/impact/'
+jar_content_magic = ["impact client", "4impact", "impactplus"]
+dir_regex = '(^|/)impact(/|$)'
+
+[[signature]]
+id = "konas.client"
+family = "Konas Client"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.9
+weight = 55
+explain = "Konas Client - open-source чит-клиент для Fabric/Forge."
+name_regex = '(?i)^konas([-_.0-9a-z]+)?\.jar$'
+jar_entry_regex = '(?i)^dev/konas(ikarus|dev)?/|^kndl/'
+jar_content_magic = ["konas client", "kndlib"]
+
+[[signature]]
+id = "paimon.client"
+family = "Paimon / Prodigy"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.9
+weight = 55
+explain = "Paimon Client и связанные форки (Prodigy) - чит-клиенты."
+name_regex = '(?i)^(paimon|prodigy)([-_.0-9a-z]+)?\.jar$'
+jar_content_magic = ["paimon client", "prodigy client"]
+dir_regex = '(^|/)(paimon|prodigy)(/|$)'
+
+[[signature]]
+id = "inertia.client"
+family = "Inertia"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.85
+weight = 52
+explain = "Inertia - закрытый чит-клиент, распространяется агентом."
+name_regex = '(?i)^inertia[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["inertia client", "inertia injection"]
+
+[[signature]]
+id = "future.client"
+family = "Future Client"
+kind = "cheat_client"
+severity = "critical"
+confidence = 0.9
+weight = 58
+explain = "Future Client - закрытый платный чит. Часто носит crack-сборку со встроенным инжектором."
+verify = "Кроме jar искать dll/agent и каталог Future: crack-сборки кладут рядом свой лаунчер."
+name_regex = '(?i)^future([-_ ]?client)?[-_.0-9a-z]*\.(jar|exe|dll)$'
+jar_content_magic = ["future client", "unleguistics"]
+dir_regex = '(^|/)(Future|FutureClient)(/|$)'
+
+[[signature]]
+id = "vaper.client"
+family = "Vaper Client"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.85
+weight = 50
+explain = "VaPer Client - чит-клиент."
+name_regex = '(?i)^va[-_ ]?per([-_.0-9a-z]+)?\.jar$'
+jar_content_magic = ["vaper client"]
+dir_regex = '(^|/)va[-_]?per(/|$)'
+
+[[signature]]
+id = "root.client"
+family = "Root / Salient / Ronim"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.8
+weight = 45
+explain = "Root, Salient, Ronim.alt, Twilight - нишевые чит-клиенты."
+name_regex = '(?i)^(root|ronim[-_.]?alt|salient|twilight)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["root client", "salient client"]
+
+[[signature]]
+id = "x11.client"
+family = "X11 / Venium / Naven"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.8
+weight = 45
+explain = "X11, Venium, Naven - чит-клиенты с закрытым исходником."
+name_regex = '(?i)^(x11|venium|naven)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["venium client", "x11 client", "naven client"]
+
+[[signature]]
+id = "nullx.client"
+family = "Nullx / Skid / Godlike"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.78
+weight = 42
+explain = "Мелкие чит-клиенты и перепакованные форки."
+name_regex = '(?i)^(nullx|null[-_ ]?client|skid|godlike|quiver)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["null client", "godlike client", "skid client"]
+
+[[signature]]
+id = "client.jar.generic"
+family = "Неизвестный клиент"
+kind = "cheat_client"
+severity = "medium"
+confidence = 0.5
+weight = 25
+explain = "Архив содержит классы с именами, типичными для чит-клиентов (aura/reach/velocity/fly/scaffold), но совпадения с известным клиентом нет."
+verify = "Только повод посмотреть файл. Часть таких находок - легитимные библиотеки, шейдеры, дата-паки."
+jar_entry_regex = '(?i)/(killaura|aimassist|reachhack|autototem|scaffold|noclip|freecam|flight|invulnerable)/[A-Za-z0-9_]+\.class$'
+jar_content_magic = ["hack category", "module category"]
+
+[[signature]]
+id = "client.repack.rename"
+family = "Перепакованный чит"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.7
+weight = 40
+explain = "Jar с кодом чит-клиента внутри, переименованный под безобидное имя (частый приём маскировки)."
+verify = "Сравнить хэш с официальным релизом мода с тем же именем. Не совпал - файл пересобран."
+path_regex = '(^|/)(mods|addons)/[^/]*(optimi[sz]er|fastload|speedup|boost|utility|enhancer|tweaker)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["meteorclient", "wurstclient", "baritone", "liquidbounce"]
+
+[[signature]]
+id = "launcher.mods.blacklist"
+family = "Подозрительное имя в mods"
+kind = "cheat_client"
+severity = "high"
+confidence = 0.55
+weight = 30
+explain = "Jar в mods/ с именем, замаскированным под случайный набор символов или заглушку (test.jar, asd.jar, new.jar)."
+verify = "Легитимные сборки так не называются. Посмотреть файл: часто это чит, переименованный под фильтр античита."
+path_regex = '(^|/)(mods|addons)/[a-z0-9]{18,}\.jar$'
+name_regex = '^(test|tmp|asd|qw|new|final|1|2|3|a|b|s)\.jar$'
+
+# ---------------------------------------------------------------------------
+# X-RAY / ПОИСК РУДЫ
+# ---------------------------------------------------------------------------
+
+[[signature]]
+id = "xray.mod"
+family = "X-Ray"
+kind = "xray"
+severity = "critical"
+confidence = 0.9
+weight = 55
+explain = "X-Ray мод или клиент: скрытие блоков для видимости руды."
+name_regex = '(?i)^(x[-_ ]?ray|xray|orefinder|mineshack|frexray)[-_.0-9a-z]*\.(jar|zip|litemod)$'
+jar_content_magic = ["xray", "ore highlight", "stonecull"]
+text_regex = '(?i)"(xray|highlightOres)"'
+
+[[signature]]
+id = "xray.resourcepack"
+family = "X-Ray ресурспак"
+kind = "xray"
+severity = "high"
+confidence = 0.8
+weight = 45
+explain = "Ресурспак, где текстуры обычных блоков заменены прозрачными PNG - X-Ray через ресурспак."
+verify = "Открыть пак: если stone/deepslate/dirt/gravel.png прозрачные, а руды нет - это X-Ray."
+path_regex = '(^|/)(resourcepacks?|server-resource-packs)/assets/minecraft/textures/block/(stone|deepslate|dirt|gravel|andesite|granite|tuff|calcite)\.png$'
+
+[[signature]]
+id = "xray.resourcepack.zip"
+family = "X-Ray ресурспак"
+kind = "xray"
+severity = "high"
+confidence = 0.65
+weight = 40
+explain = "Архив ресурспака содержит записи с текстурами обычных блоков (проверяется по имени записи внутри zip)."
+verify = "Распаковать и посмотреть альфа-канал этих PNG."
+path_regex = '(^|/)(resourcepacks?|server-resource-packs)/[^/]+\.zip$'
+jar_entry_regex = '(?i)assets/minecraft/textures/block/(stone|deepslate|dirt|gravel|andesite|tuff|calcite)\.png$'
+
+# ---------------------------------------------------------------------------
+# АВТОКЛИКЕРЫ И МАКРОСЫ
+# ---------------------------------------------------------------------------
+
+[[signature]]
+id = "autoclicker"
+family = "Autoclicker"
+kind = "autoclicker"
+severity = "high"
+confidence = 0.8
+weight = 40
+explain = "Программа-автокликер. PvP через автокликер равносильно киллауре."
+name_regex = '(?i)^(autoclicker|clicker|rapid[-_ ]?fire|auto[-_ ]?clicker|mchook|opautoclicker|autofire)[-_.0-9a-z]*\.(exe|jar|dll)$'
+path_regex = '(^|/)(AutoClicker|autoclicker)/'
+
+[[signature]]
+id = "macro.tool"
+family = "Макрос / скрипт ввода"
+kind = "macro"
+severity = "medium"
+confidence = 0.55
+weight = 25
+explain = "Макрос-инструмент или скрипт автоматизации ввода (AutoHotkey, Macro Recorder, PyAutoGUI)."
+verify = "Скрипт может быть для работы, а не для игры. Смотреть, запущен ли он во время игры."
+name_regex = '(?i)\.(ahk|ahkl)$|^(autohotkey|macro[-_ ]?recorder|pulover|pyautogui)[-_.0-9a-z]*'
+
+# ---------------------------------------------------------------------------
+# ИНЪЕКЦИИ / АГЕНТЫ / ОБХОД ЦЕЛОСТНОСТИ JVM
+# ---------------------------------------------------------------------------
+
+[[signature]]
+id = "inject.javaagent"
+family = "Java Agent"
+kind = "injection"
+severity = "high"
+confidence = 0.7
+weight = 40
+explain = "В аргументах запуска игры есть -javaagent на jar, который не относится к известным легитимным мод-лоадерам. Чит-клиенты внедряются именно агентом."
+verify = "Сверить названный в логе jar по хэшу. Легитимный агент - обычно fabric-loader, forge, optifine, lunar."
+log_regex = '-javaagent:[^\r\n"]+\.jar'
+
+[[signature]]
+id = "inject.bootclasspath"
+family = "Подмена classpath"
+kind = "injection"
+severity = "high"
+confidence = 0.75
+weight = 42
+explain = "Аргументы запуска подменяют bootclasspath или включают attach-API: типовой признак инжектора в живую JVM."
+log_regex = '-Xbootclasspath(/[pa])?:|allowAttachSelf|StartAttachListener|EnableDynamicAgentLoading'
+
+[[signature]]
+id = "inject.dll"
+family = "DLL-инъекция"
+kind = "injection"
+severity = "critical"
+confidence = 0.8
+weight = 50
+explain = "DLL с именем, характерным для инжектора/чит-клиента, в игровой директории (каталоги нативок LWJGL исключены)."
+verify = "Посмотреть экспорты DLL. Легитимных dll с такими именами в .minecraft нет."
+name_regex = '(?i)^(inject|injector|hook|client|loader|core|future|venari|arcadia|vapor|native)[-_.0-9a-z]*\.dll$'
+
+[[signature]]
+id = "dll.loose"
+family = "Сторонняя DLL"
+kind = "injection"
+severity = "medium"
+confidence = 0.4
+weight = 20
+explain = "DLL лежит прямо в корне игровой папки. В нормальной сборке все dll живут в каталогах нативок."
+name_regex = '(?i)^[^/]+\.dll$'
+path_regex = '^[^/]+\.dll$'
+
+[[signature]]
+id = "cracked.auth"
+family = "Пиратка / обход авторизации"
+kind = "cracked_launcher"
+severity = "medium"
+confidence = 0.6
+weight = 20
+explain = "Артефакты обхода лицензии (offline-лаунчеры, skin-прослушиватели). Само по себе не чит, но часто идёт в комплекте с читом."
+verify = "Лицензионность клиента видно по UUID на входе, не по отчёту."
+name_regex = '(?i)^(tlaunchedergui|salwix|skyn|minecrack|policecraft|lrnclient|hlap)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["offline mode", "cracked launcher", "skin injection"]
+
+# ---------------------------------------------------------------------------
+# СЕРЫЕ ПОМОЩНИКИ
+# ---------------------------------------------------------------------------
+
+[[signature]]
+id = "grey.litematica"
+family = "Litematica / Printer"
+kind = "grey_helper"
+severity = "medium"
+confidence = 0.7
+weight = 25
+explain = "Litematica и принтеры (WSB/Silva) дают автоматическую постройку по схеме; в связке с macro-key - авто-копка."
+verify = "Смотреть config: printer/executeBehaviors и macro keybinds. Принтер на SMP - бан по правилам."
+name_regex = '(?i)^(litematica|wsb|silva|tweakermore)[-_.0-9a-z]*\.jar$'
+text_regex = '(?i)"(printer|executeBehaviors|abandonedForward)"'
+
+[[signature]]
+id = "grey.autotool"
+family = "Авто-действия"
+kind = "grey_helper"
+severity = "medium"
+confidence = 0.55
+weight = 20
+explain = "Моды авто-действий (auto-sprint, auto-tool, autoswitch, autocraft) - автоматизация, запрещённая на большинстве SMP."
+name_regex = '(?i)^(autoswitch|autocraft|auto[-_ ]?sprint|macro[-_ ]?quake|auto[-_ ]?tool|auto-fish)[-_.0-9a-z]*\.jar$'
+jar_content_magic = ["auto tool", "auto switch"]
+
+[[signature]]
+id = "grey.tracker"
+family = "Трекер игроков"
+kind = "grey_helper"
+severity = "medium"
+confidence = 0.5
+weight = 20
+explain = "Трекер игроков/сущностей вне игрового экрана - даёт преимущество, недоступное честной игре."
+name_regex = '(?i).*(radar|player[-_ ]?track|entity[-_ ]?esp)[-_0-9a-z]*\.jar$'
+
+[[signature]]
+id = "config.leftover"
+family = "Остаточный конфиг"
+kind = "config_leftover"
+severity = "medium"
+confidence = 0.45
+weight = 22
+explain = "Каталог или конфиг чит-клиента остался после удаления самого клиента."
+verify = "Удалённый клиент не оправдание: смотреть mtime файлов и спросить, когда и почему ставился."
+dir_regex = '(^|/)(meteor[-_]?client|wurst|baritone|impact|konas|paimon|liquidbounce|future[-_]?client|vaper|x11|venium)(/|$)'
+
+# ---------------------------------------------------------------------------
+# ИСКЛЮЧЕНИЯ (легитимное - чтобы не плодить ложные срабатывания)
+# ---------------------------------------------------------------------------
+
+[[exclude]]
+id = "fabric-loader"
+family = "Java Agent"
+reason = "Fabric Loader легитимно использует -javaagent."
+name_regex = '(?i)^fabric-loader[-_.0-9a-z]*\.jar$'
+
+[[exclude]]
+id = "forge-neoforge"
+family = "Java Agent"
+reason = "Forge/NeoForge легитимно запускаются через агент и подменяют classpath."
+name_regex = '(?i)^(forge|neoforge|universal|fmlloadcontroller|securejarhandler)[-_.0-9a-z]*\.jar$'
+
+[[exclude]]
+id = "lunar-badlion"
+family = "Java Agent"
+reason = "Lunar/Badlion/PixelLauncher - легитимные клиентские лаунчеры со своими агентами."
+name_regex = '(?i)^(lunarclient|lunar|lunar-|badlion|pixel[-_]?launcher|motlauncher)[-_.0-9a-z]*\.(jar|dll)$'
+
+[[exclude]]
+id = "vanilla-natives"
+reason = "Нативки LWJGL и звуковой модуль Minecraft."
+name_regex = '(?i)^(lwjgl|openal|jinput|asm|commons-|guava|log4j|velocity|brigadier|gson|joml|netty|sqlite|jna)[-_0-9a-z.]*\.(dll|so|dylib)$'
+
+[[exclude]]
+id = "pop-mods"
+reason = "Популярные производительные и визуальные моды: читами не являются."
+name_regex = '(?i)^(sodium|rubidium|embeddium|iris|oculus|vulkanmod|lithium|servercore|krypton|starlight|ferritecore|moonlight|modernfix|c2me|fastutil[-_]itf|nochatreports|voicechat|xaeros?[-_]?(minimap|worldmap)|journeymap|jei|rei|emi|appleskin|craftingtweaks|inventory[-_]?sorter|mouse[-_]?wheel|armor[-_]?hud|trinkets|cloth[-_]?config|architectury|paxi|continuity|animatica|betterfps|entityculling|chunkbuilder|modmenu|fabric[-_]api|forgemodconfigapi|catalogue|placeholder[-_]api|geckolib|playeranimator)[-_0-9a-z.]*\.jar$'
+
+[[exclude]]
+id = "launcher-metadata"
+reason = "Служебные файлы лаунчера - не игровые моды."
+path_regex = '(^|/)(launcher\.json|profileProperties/|\.mcsettings|optionsof\.txt|options\.txt)$'

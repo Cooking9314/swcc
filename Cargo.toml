@@ -1,0 +1,29 @@
+[package]
+name = "swcc"
+version = "0.1.0"
+edition = "2024"
+description = "Sunrise Worlds Cheats Checker - локальный сканер признаков чит-клиентов Minecraft"
+
+[dependencies]
+eframe = "0.37.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.2"
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2.5"
+regex = "1.13"
+chrono = "0.4"
+anyhow = "1.0"
+base64 = "0.23"
+rfd = "0.17"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = "debuginfo"
+
+[build-dependencies]
+winresource = "0.1.34"
